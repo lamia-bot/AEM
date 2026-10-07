@@ -1,0 +1,97 @@
+name: Build Windows MEA Analyzer
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install build dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-build.txt
+
+      - name: Syntax check
+        shell: pwsh
+        run: |
+          python -m compileall -q app.py mea_analyzer
+
+      - name: Scientific logic smoke test
+        shell: pwsh
+        run: |
+          python -c "import numpy as np; from mea_analyzer.analysis_logic import calculate_z_score_v7, detect_spikes_v7; t=np.arange(6.0); v=np.array([0.,0.,0.,5.,0.,0.]); z=calculate_z_score_v7(v); times,idx=detect_spikes_v7(z,t,1.0); assert len(idx)==1 and int(idx[0])==3; print('logic smoke test passed')"
+
+      - name: UI import smoke test
+        shell: pwsh
+        run: |
+          python -c "from mea_analyzer.main_window import MainWindow; from mea_analyzer.widgets import LandmarksPlot; print('UI imports passed')"
+
+      - name: Build 22 lazy CSV smoke test
+        shell: pwsh
+        run: |
+          @"
+          Time,E1,E2,E3
+          0,0.1,1.0,
+          1,0.2,1.1,
+          2,0.3,1.2,
+          3,0.4,1.3,
+          "@ | Set-Content -Encoding UTF8 "_smoke_recording.csv"
+          python -c "import sys; from pathlib import Path; from mea_analyzer.cache import CacheManager; from mea_analyzer.io_loader import prepare_recording_cache, prepare_range_preview, load_electrode_range; p=Path('_smoke_recording.csv').resolve(); cm=CacheManager(); r=prepare_recording_cache(p,cm); assert r.source_format=='csv'; assert r.cache_parquet is None; assert not r.row_count_exact; assert 'openpyxl' not in sys.modules; assert len(r.electrode_columns)==3; assert r.electrode_has_data[r.electrode_columns[0]]; assert not r.electrode_has_data[r.electrode_columns[2]]; pt,pv,po=prepare_range_preview(r,r.electrode_columns[0]); assert len(pt)>=2 and len(pt)==len(pv)==len(po); t,v=load_electrode_range(r,r.electrode_columns[0],1.0,2.0); assert t.tolist()==[1.0,2.0] and v.tolist()==[0.2,0.3]; cm.clear_entries([r.cache_dir]); print('Build 22 lazy CSV smoke test passed')"
+          Remove-Item "_smoke_recording.csv" -Force
+
+      - name: Build onedir Windows application
+        shell: pwsh
+        run: |
+          pyinstaller --noconfirm --clean MEA_Analyzer_Build22.spec
+
+      - name: Verify package
+        shell: pwsh
+        run: |
+          if (!(Test-Path "dist\MEA_Analyzer\MEA_Analyzer.exe")) { throw "MEA_Analyzer.exe was not produced" }
+          Get-ChildItem "dist\MEA_Analyzer" | Select-Object Name,Length
+
+      - name: Add friend-facing README
+        shell: pwsh
+        run: |
+          @"
+          MEA Analyzer v8 - Build 22
+
+          1. Keep this entire MEA_Analyzer folder together.
+          2. Double-click MEA_Analyzer.exe.
+          3. Do not move only the EXE out of this folder; the _internal folder contains required packages.
+          4. Recording input supports .csv (preferred) and .xlsx. Column 1 is Time; the next up to 64 columns are electrodes.
+          5. Large CSVs use ~5k points for Electrode selection and ~30k points for Range selection. Full-resolution CSV data is read only after confirming the range, and only for the selected interval.
+          6. Windows SmartScreen may warn because this private build is not digitally signed. Choose More info > Run anyway only if you received this package from the expected sender.
+
+          If the app encounters an unexpected error, send the MEA_Analyzer.log file from:
+          %LOCALAPPDATA%\MEA Analyzer\Logs
+          "@ | Set-Content -Encoding UTF8 "dist\MEA_Analyzer\README_FIRST.txt"
+
+      - name: Create distributable ZIP
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "dist\MEA_Analyzer" -DestinationPath "MEA_Analyzer_Windows_Build22.zip" -CompressionLevel Optimal
+
+      - name: Upload Windows build
+        uses: actions/upload-artifact@v4
+        with:
+          name: MEA_Analyzer_Windows_Build22
+          path: MEA_Analyzer_Windows_Build22.zip
+          if-no-files-found: error
+          retention-days: 30
